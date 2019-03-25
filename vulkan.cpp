@@ -63,6 +63,7 @@ int main1(int argc, char** argv)
 #include <iostream>
 #include <string>
 #include <vector>
+#include <set>
 
 //#define GLFW_INCLUDE_VULKAN
 //#include <GLFW/glfw3.h>
@@ -81,6 +82,12 @@ private:
 	void createvulkaninstance();
 	void initrequiredexterns();
 	void setdebugcallback();
+	void pickphysicdevice();
+	void createlogicdevice();
+	int32_t queryQueueFamily(VkPhysicalDevice device);
+	int32_t querypresendfamily(VkPhysicalDevice device);
+	void createsurface();
+	bool checkdeviceextensionsupport(VkPhysicalDevice device);
 private:
 	GLFWwindow* window;
 	VkInstance instance;
@@ -89,11 +96,21 @@ private:
 	std::vector<const char*> playerNames;
 	std::vector<std::string> externNames;
 	std::vector<const char*> pexternNames;
+	VkPhysicalDevice physicdevice;
+	VkDevice logicdevice;
+	VkQueue logicgraphicsQueue;
+	VkQueue logicpresendQueue;
+	float logicqueuePriority;
+	VkSurfaceKHR surface;
 };
 
 HelloTriangleApp::HelloTriangleApp()
 {
 	window = NULL;
+	logicqueuePriority = 1.0f;
+	surface = VK_NULL_HANDLE;
+	logicpresendQueue = VK_NULL_HANDLE;
+	logicgraphicsQueue = VK_NULL_HANDLE;
 }
 
 void HelloTriangleApp::run()
@@ -115,6 +132,9 @@ void HelloTriangleApp::initwindow()
 void HelloTriangleApp::initvulkan()
 {
 	createvulkaninstance();
+	pickphysicdevice();
+	createsurface();
+	createlogicdevice();
 }
 
 void HelloTriangleApp::initrequiredexterns()
@@ -265,12 +285,201 @@ void HelloTriangleApp::cleanup()
 	{
 		func(instance, callback, nullptr);
 	}
+	vkDestroyDevice(logicdevice, nullptr);
+
+	vkDestroySurfaceKHR(instance, surface, NULL);
 
 	vkDestroyInstance(instance, NULL);
 
 	glfwDestroyWindow(window);
 
 	glfwTerminate();
+}
+
+void HelloTriangleApp::pickphysicdevice()
+{
+	uint32_t devicecount = 0;
+	vkEnumeratePhysicalDevices(instance, &devicecount, NULL);
+
+	std::vector<VkPhysicalDevice> devices(devicecount);
+	vkEnumeratePhysicalDevices(instance, &devicecount, devices.data());
+
+	std::cout << "physic device: " << std::endl;
+	int rate = 0;
+	VkPhysicalDevice device = VK_NULL_HANDLE;
+
+	for (auto& item : devices)
+	{
+		int score = 0;
+		VkPhysicalDeviceProperties deviceProperties;
+		vkGetPhysicalDeviceProperties(item, &deviceProperties);
+		
+		VkPhysicalDeviceFeatures features;
+		vkGetPhysicalDeviceFeatures(item, &features);
+
+		std::cout << deviceProperties.deviceName << " " << deviceProperties.vendorID << std::endl;
+		if (deviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
+		{
+			score += 1000;
+		}
+
+		score += deviceProperties.limits.maxImageDimension2D;
+		
+		if (!features.geometryShader)
+		{
+			continue;
+		}
+
+		if (queryQueueFamily(item) == -1)
+		{
+			continue;
+		}
+
+		if (score > rate)
+		{
+			rate = score;
+			device = item;
+		}
+
+		std::cout << "rate: " << rate << std::endl;
+		physicdevice = device;
+		assert(device != VK_NULL_HANDLE);
+	}
+}
+
+int32_t HelloTriangleApp::queryQueueFamily(VkPhysicalDevice device)
+{
+	uint32_t familycount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &familycount, NULL);
+
+	std::vector<VkQueueFamilyProperties> properties(familycount);
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &familycount, properties.data());
+
+	int32_t ret = -1;
+	int32_t index = -1;
+	for (auto& item : properties)
+	{
+		++index;
+		if (item.queueCount > 0 && (item.queueFlags & VK_QUEUE_GRAPHICS_BIT))
+		{
+			ret = index;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+int32_t HelloTriangleApp::querypresendfamily(VkPhysicalDevice device)
+{
+	uint32_t familycount = 0;
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &familycount, NULL);
+
+	std::vector<VkQueueFamilyProperties> properties(familycount);
+	vkGetPhysicalDeviceQueueFamilyProperties(device, &familycount, properties.data());
+
+	int32_t ret = -1;
+	int32_t index = -1;
+	for (auto& item : properties)
+	{
+		++index;
+		VkBool32 presentSupport = false;
+		vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &presentSupport);
+		if (item.queueCount > 0 && presentSupport)
+		{
+			ret = index;
+			break;
+		}
+	}
+
+	return ret ;
+}
+
+void HelloTriangleApp::createlogicdevice()
+{
+	assert(physicdevice != VK_NULL_HANDLE);
+
+	std::vector<VkDeviceQueueCreateInfo> queuecreateinfos;
+	VkDeviceQueueCreateInfo queuecreateinfo = {};
+	queuecreateinfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+	queuecreateinfo.queueFamilyIndex = queryQueueFamily(physicdevice);
+	queuecreateinfo.pQueuePriorities = &logicqueuePriority;
+	queuecreateinfo.queueCount = 1;
+	queuecreateinfos.push_back(queuecreateinfo);
+
+	queuecreateinfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+	queuecreateinfo.queueFamilyIndex = querypresendfamily(physicdevice);
+	queuecreateinfo.pQueuePriorities = &logicqueuePriority;
+	queuecreateinfo.queueCount = 1;
+	queuecreateinfos.push_back(queuecreateinfo);
+
+
+	VkPhysicalDeviceFeatures features = {};
+
+	std::vector<const char*> validextensionnames;
+	validextensionnames.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+	VkDeviceCreateInfo createinfo = {};
+	createinfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+	createinfo.pQueueCreateInfos = queuecreateinfos.data();
+	createinfo.queueCreateInfoCount = queuecreateinfos.size();
+	createinfo.pEnabledFeatures = &features;
+	createinfo.enabledExtensionCount = 0;
+	std::vector<const char*> layers;
+	playerNames.push_back("VK_LAYER_LUNARG_standard_validation");
+	createinfo.enabledLayerCount = layers.size();
+	createinfo.ppEnabledLayerNames = layers.data();
+
+	VkResult ret = vkCreateDevice(physicdevice, &createinfo, NULL, &logicdevice);
+	if (ret != VK_SUCCESS)
+	{
+		std::cout << "create logic device failed. " << ret << std::endl;
+		return;
+	}
+
+	vkGetDeviceQueue(logicdevice, queryQueueFamily(physicdevice), 0, &logicgraphicsQueue);
+	vkGetDeviceQueue(logicdevice, querypresendfamily(physicdevice), 0, &logicpresendQueue);
+}
+
+void HelloTriangleApp::createsurface()
+{
+	VkResult ret = glfwCreateWindowSurface(instance, window, nullptr, &surface);
+	if (ret != VK_SUCCESS)
+	{
+		std::cout << "create surface failed. " << ret << std::endl;
+	}
+}
+
+bool HelloTriangleApp::checkdeviceextensionsupport(VkPhysicalDevice device)
+{
+	std::vector<const char*> validextensionnames;
+	validextensionnames.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+
+	uint32_t extensioncount = 0;
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &extensioncount, nullptr);
+
+	std::vector< VkExtensionProperties> properties(extensioncount);
+	vkEnumerateDeviceExtensionProperties(device, nullptr, &extensioncount, properties.data());
+
+	for (auto s : validextensionnames)
+	{
+		bool r = false;
+		for (auto item : properties)
+		{
+			if (strcmp(item.extensionName, s) == 0)
+			{
+				r = true;
+				break;
+			}
+		}
+
+		if (!r)
+		{
+			return false;
+		}
+	}
+
+	return true;
 }
 
 int main(int argc, char **argv)
